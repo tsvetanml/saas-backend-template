@@ -5,13 +5,17 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { PrismaService } from 'src/prisma/prisma.service';
 import { AuthenticatedRequest } from './auth.types';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
-  constructor(private jwtService: JwtService) {}
+  constructor(
+    private jwtService: JwtService,
+    private prisma: PrismaService,
+  ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const authHeader = request.headers.authorization;
 
@@ -23,6 +27,18 @@ export class JwtAuthGuard implements CanActivate {
 
     const token = authHeader.split(' ')[1];
 
+    console.log('Received Token:', token); // 🔍 Debug
+
+    // Verify if the token has been revoked
+    const isRevoked = await this.prisma.revokedToken.findUnique({
+      where: { token },
+    });
+
+    if (isRevoked) {
+      console.log('Token has been revoked:', token); // 🔍 Debug
+      throw new UnauthorizedException('Token has been revoked');
+    }
+
     try {
       console.log('JWT Secret in JwtAuthGuard:', process.env.JWT_SECRET); // 🔍 Debug
       const decoded = this.jwtService.verify(token, {
@@ -32,7 +48,7 @@ export class JwtAuthGuard implements CanActivate {
       request.user = decoded;
       return true;
     } catch (error) {
-      console.log('JWT Error:', error); // 🔍 Debug
+      console.log('JWT Verification Error:', error.message); // 🔍 Debug
       throw new UnauthorizedException('Invalid token');
     }
   }
