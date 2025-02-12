@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from 'src/prisma/prisma.service';
@@ -10,10 +10,15 @@ export class AuthService {
     private jwtService: JwtService,
   ) {}
 
-  async register(email: string, password: string) {
+  async register(
+    email: string,
+    password: string,
+    role: 'USER' | 'ADMIN' = 'USER',
+  ) {
     const hashedPassword = await bcrypt.hash(password, 10);
+
     return this.prisma.user.create({
-      data: { email, password: hashedPassword },
+      data: { email, password: hashedPassword, role },
     });
   }
 
@@ -21,16 +26,19 @@ export class AuthService {
     const user = await this.prisma.user.findUnique({ where: { email } });
 
     if (!user) {
-      throw new UnauthorizedException('User not found');
+      throw new Error('User not found');
     }
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch) {
-      throw new UnauthorizedException('Invalid password');
+      throw new Error('Incorrect password');
     }
 
-    // Generar el JWT
-    const token = this.jwtService.sign({ id: user.id, email: user.email });
+    const token = this.jwtService.sign({
+      id: user.id,
+      email: user.email,
+      role: user.role,
+    });
 
     return { access_token: token };
   }
