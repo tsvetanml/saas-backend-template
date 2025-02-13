@@ -34,3 +34,13 @@ model RevokedToken {
   createdAt DateTime @default(now())
 }
 
+model Subscription {
+  id            String   @id @default(uuid())
+  userId        String   // ID of the user who paid
+  stripeId      String   @unique // Subscription ID in Stripe
+  status        String   // Subscription status (active, canceled, etc.)
+  plan          String   // Subscribed plan (basic, premium)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
