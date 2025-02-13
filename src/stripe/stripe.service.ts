@@ -81,35 +81,54 @@ export class StripeService {
 
     console.log('🔍 Event received:', event.type);
 
-    if (event.type === 'checkout.session.completed') {
-      const session = event.data.object;
-      console.log('✅ Successful payment:', session);
+    // ✅ Handle failed payment
+    if (event.type === 'invoice.payment_failed') {
+      const invoice = event.data.object;
+      const subscriptionId = invoice.subscription; // 👈 Get subscription ID
 
-      // 🔹 Extract correct subscription ID
-      const subscriptionId = session.subscription; // 👈 This is the correct ID (sub_...)
       if (!subscriptionId) {
-        console.error('⚠️ No subscription ID found in session.');
-        return { error: 'No subscription ID in session.' };
+        console.error('⚠️ No subscription ID found in failed invoice.');
+        return { error: 'No subscription ID in invoice.' };
       }
 
-      const userId = session.metadata?.userId || '123'; // Mocked user ID
-      const plan = session.metadata?.plan || 'basic';
-      const status = 'active';
-
       try {
-        // 🔥 Save the correct subscription ID in the database
-        await this.prisma.subscription.create({
-          data: {
-            userId,
-            stripeId: subscriptionId, // 👈 Now we store the real Subscription ID (sub_...)
-            status,
-            plan,
-          },
+        // 🔄 Mark the subscription as "past_due" in the database
+        await this.prisma.subscription.updateMany({
+          where: { stripeId: subscriptionId },
+          data: { status: 'past_due' },
         });
 
-        console.log(`✅ Subscription saved in the database for user ${userId}`);
+        console.log(`🚨 Subscription ${subscriptionId} marked as past_due.`);
       } catch (dbError) {
-        console.error('⚠️ Error saving subscription in DB:', dbError);
+        console.error('⚠️ Error updating subscription status:', dbError);
+      }
+    }
+
+    // ❌ Handle automatic subscription cancellation
+    if (event.type === 'customer.subscription.deleted') {
+      const subscription = event.data.object;
+      const subscriptionId = subscription.id; // 👈 Get subscription ID
+
+      if (!subscriptionId) {
+        console.error('⚠️ No subscription ID found in deletion event.');
+        return { error: 'No subscription ID in event.' };
+      }
+
+      try {
+        // 🔄 Mark the subscription as "canceled" in the database
+        await this.prisma.subscription.updateMany({
+          where: { stripeId: subscriptionId },
+          data: { status: 'canceled' },
+        });
+
+        console.log(
+          `❌ Subscription ${subscriptionId} has been fully canceled.`,
+        );
+      } catch (dbError) {
+        console.error(
+          '⚠️ Error updating subscription status to canceled:',
+          dbError,
+        );
       }
     }
 
