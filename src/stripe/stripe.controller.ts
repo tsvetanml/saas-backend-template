@@ -18,7 +18,6 @@ export class StripeController {
   @Post('checkout')
   @UseGuards(JwtAuthGuard) // 🔒 Only authenticated users can access this
   async createCheckout(@Req() req, @Body() body: { plan: string }) {
-    console.log('req.user.id:', req.user.id); // 🔥 Debug
     return this.stripeService.createCheckoutSession(req.user.id, body.plan);
   }
 

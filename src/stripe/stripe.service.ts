@@ -5,6 +5,7 @@ import {
   RawBodyRequest,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { AppLogger } from 'src/logger/logger.service';
 import { PrismaService } from 'src/prisma/prisma.service';
 import Stripe from 'stripe';
 
@@ -15,12 +16,10 @@ export class StripeService {
   constructor(
     private configService: ConfigService,
     private prisma: PrismaService,
+    private logger: AppLogger, // ✅ Inject logger
   ) {
     const stripeSecretKey = this.configService.get<string>('STRIPE_SECRET_KEY');
-    console.log(
-      '🛠️ Stripe Secret Key:',
-      stripeSecretKey ? 'Loaded ✅' : 'Not Found ❌',
-    ); // 🔥 Debug
+
     if (!stripeSecretKey) {
       throw new Error('Stripe secret key is not defined');
     }
@@ -30,32 +29,36 @@ export class StripeService {
   }
 
   async createCheckoutSession(userId: string, plan: string) {
+    this.logger.log(
+      `🛒 Creating checkout session for user ${userId}, plan: ${plan}`,
+    );
+
     const prices = {
-      basic: 'price_1QrkNP03ovCgBSlffN9PTnci', // Change with your real ID in Stripe
-      premium: 'price_1QrkNp03ovCgBSlf1oTMFK3n', // Change with your real ID in Stripe
+      basic: 'price_1QrkNP03ovCgBSlffN9PTnci',
+      premium: 'price_1QrkNp03ovCgBSlf1oTMFK3n',
     };
 
-    const session = await this.stripe.checkout.sessions.create({
-      payment_method_types: ['card'],
-      mode: 'subscription',
-      customer_email: `user_${userId}@example.com`, // 👈 Ensure uniqueness
-      line_items: [
-        {
-          price: prices[plan],
-          quantity: 1,
-        },
-      ],
-      // If you have a frontend, these URLs should point to your frontend:
-      success_url: 'http://localhost:4000/stripe/success', // 'https://yourfrontend.com/payment-success',
-      cancel_url: 'http://localhost:4000/stripe/cancel', // 'https://yourfrontend.com/payment-failed',
-      metadata: { userId }, // 👈 Store userId in metadata for webhooks
-    });
+    try {
+      const session = await this.stripe.checkout.sessions.create({
+        payment_method_types: ['card'],
+        mode: 'subscription',
+        customer_email: `user_${userId}@example.com`,
+        line_items: [{ price: prices[plan], quantity: 1 }],
+        success_url: 'http://localhost:4000/stripe/success',
+        cancel_url: 'http://localhost:4000/stripe/cancel',
+        metadata: { userId },
+      });
 
-    return { url: session.url };
+      this.logger.log(`✅ Checkout session created: ${session.id}`);
+      return { url: session.url };
+    } catch (error) {
+      this.logger.error(`❌ Error creating checkout session: ${error.message}`);
+      throw new ForbiddenException('Failed to create checkout session.');
+    }
   }
 
   async handleWebhook(req: RawBodyRequest<Request>, signature: string) {
-    console.log('📩 Webhook received in NestJS');
+    this.logger.log('📩 Webhook received in NestJS');
 
     const endpointSecret = this.configService.get<string>(
       'STRIPE_WEBHOOK_SECRET',
@@ -66,68 +69,66 @@ export class StripeService {
 
     let event;
     try {
-      if (!req.rawBody) {
-        throw new Error('Raw body is undefined');
-      }
+      if (!req.rawBody) throw new Error('Raw body is undefined');
+
       event = this.stripe.webhooks.constructEvent(
         req.rawBody,
         signature,
         endpointSecret,
       );
     } catch (err) {
-      console.error('⚠️ Webhook Error:', err.message);
+      this.logger.error(`⚠️ Webhook Error: ${err.message}`);
       return { error: 'Webhook error' };
     }
 
-    console.log('🔍 Event received:', event.type);
+    this.logger.log(`🔍 Event received: ${event.type}`);
 
-    // ✅ Handle failed payment
+    // ✅ Handle failed payments
     if (event.type === 'invoice.payment_failed') {
       const invoice = event.data.object;
-      const subscriptionId = invoice.subscription; // 👈 Get subscription ID
+      const subscriptionId = invoice.subscription;
 
       if (!subscriptionId) {
-        console.error('⚠️ No subscription ID found in failed invoice.');
+        this.logger.warn('⚠️ No subscription ID found in failed invoice.');
         return { error: 'No subscription ID in invoice.' };
       }
 
       try {
-        // 🔄 Mark the subscription as "past_due" in the database
         await this.prisma.subscription.updateMany({
           where: { stripeId: subscriptionId },
           data: { status: 'past_due' },
         });
-
-        console.log(`🚨 Subscription ${subscriptionId} marked as past_due.`);
+        this.logger.warn(
+          `🚨 Subscription ${subscriptionId} marked as past_due.`,
+        );
       } catch (dbError) {
-        console.error('⚠️ Error updating subscription status:', dbError);
+        this.logger.error(
+          `⚠️ Error updating subscription status: ${dbError.message}`,
+        );
       }
     }
 
     // ❌ Handle automatic subscription cancellation
     if (event.type === 'customer.subscription.deleted') {
       const subscription = event.data.object;
-      const subscriptionId = subscription.id; // 👈 Get subscription ID
+      const subscriptionId = subscription.id;
 
       if (!subscriptionId) {
-        console.error('⚠️ No subscription ID found in deletion event.');
+        this.logger.warn('⚠️ No subscription ID found in deletion event.');
         return { error: 'No subscription ID in event.' };
       }
 
       try {
-        // 🔄 Mark the subscription as "canceled" in the database
         await this.prisma.subscription.updateMany({
           where: { stripeId: subscriptionId },
           data: { status: 'canceled' },
         });
-
-        console.log(
+        this.logger.log(
           `❌ Subscription ${subscriptionId} has been fully canceled.`,
         );
       } catch (dbError) {
-        console.error(
-          '⚠️ Error updating subscription status to canceled:',
-          dbError,
+        this.logger.error(
+          `⚠️ Error updating subscription status to canceled: ${dbError.message}`,
         );
       }
     }
@@ -136,29 +137,31 @@ export class StripeService {
   }
 
   async cancelSubscription(userId: string) {
-    // 🔹 Find the user's active subscription
+    this.logger.log(`🔄 Attempting to cancel subscription for user ${userId}`);
+
     const subscription = await this.prisma.subscription.findFirst({
       where: { userId, status: 'active' },
     });
 
     if (!subscription) {
+      this.logger.warn(`⚠️ No active subscription found for user ${userId}`);
       throw new NotFoundException(
         'No active subscription found for this user.',
       );
     }
 
     try {
-      // 🔥 Try canceling the subscription in Stripe
       const stripeResponse = await this.stripe.subscriptions.update(
         subscription.stripeId,
         {
-          cancel_at_period_end: true, // 👈 This schedules the cancellation
+          cancel_at_period_end: true,
         },
       );
 
-      console.log('✅ Stripe Response:', stripeResponse); // 🔍 Debug Stripe response
+      this.logger.log(
+        `✅ Subscription cancellation scheduled: ${stripeResponse.id}`,
+      );
 
-      // 🔄 Update the database status
       await this.prisma.subscription.update({
         where: { id: subscription.id },
         data: { status: 'canceled' },
@@ -169,7 +172,7 @@ export class StripeService {
           'Subscription will be canceled at the end of the billing cycle.',
       };
     } catch (error) {
-      console.error('⚠️ Stripe API Error:', error); // 🔍 Log the full error response
+      this.logger.error(`⚠️ Stripe API Error: ${error.message}`);
       throw new ForbiddenException(
         `Failed to cancel subscription. ${error.message}`,
       );
